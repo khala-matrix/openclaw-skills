@@ -1,0 +1,9 @@
+{
+  "name": "dev-flow",
+  "version": "1.0.0",
+  "description": "dev-flow skill for openclaw",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/start-task.js"
+  }
+}

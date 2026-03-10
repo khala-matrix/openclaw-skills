@@ -3,15 +3,16 @@ import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { checkCodexUsage } from './check-usage.js';
 
 // -----------------------------------------------------------------
 // 环境与全局配置
 // -----------------------------------------------------------------
 const LINEAR_API_KEY = process.env.LINEAR_API_KEY;
-const isDebug = process.env.DEBUG === 'true'; 
+const isDebug = process.env.DEBUG === 'true';
 
-const PROJECT_ROOT = path.resolve(process.cwd()); 
-const OPENCLAW_DIR = path.join(PROJECT_ROOT, '.openclaw'); 
+const PROJECT_ROOT = path.resolve(process.cwd());
+const OPENCLAW_DIR = path.join(PROJECT_ROOT, '.openclaw');
 const TASKS_FILE = path.join(OPENCLAW_DIR, 'active-tasks.json');
 const PROMPTS_DIR = path.join(OPENCLAW_DIR, 'prompts');
 const LOGS_DIR = path.join(OPENCLAW_DIR, 'logs');
@@ -44,7 +45,58 @@ async function callLinearAPI(query, variables) {
     return result.data;
 }
 
-// 1. 获取任务详情及该团队的所有可用状态 (States)
+// 1. 根据 Project Name 查找优先级最高的 Todo Issue
+async function fetchNextTodoIssue(projectName) {
+    // 查找该 project 下，状态类型为 unstarted (对应的就是 Todo) 的所有 issues
+    const query = `
+        query GetIssuesByProject($projectName: String!) {
+            issues(
+                filter: {
+                    project: { name: { eqIgnoreCase: $projectName } }
+                    state: { type: { eq: "unstarted" } }
+                }
+                first: 50
+            ) {
+                nodes {
+                    id
+                    identifier
+                    title
+                    description
+                    priority
+                    createdAt
+                    state { name }
+                    team { states { nodes { id name type } } }
+                }
+            }
+        }
+    `;
+
+    const data = await callLinearAPI(query, { projectName });
+    const issues = data?.issues?.nodes || [];
+
+    if (issues.length === 0) {
+        return null;
+    }
+
+    // Linear 优先级映射: 0=No priority, 1=Urgent, 2=High, 3=Medium, 4=Low
+    // 我们希望排序逻辑：1 -> 2 -> 3 -> 4 -> 0(最后)
+    const getPriorityWeight = (p) => (p === 0 ? 99 : p);
+
+    issues.sort((a, b) => {
+        const weightA = getPriorityWeight(a.priority);
+        const weightB = getPriorityWeight(b.priority);
+        if (weightA !== weightB) {
+            return weightA - weightB; // 优先级高的（数字小的）排前面
+        }
+        // 优先级相同，按创建时间排，最早的优先
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+    });
+
+    return issues[0]; // 返回最靠前的一个
+}
+
+// 2. 获取任务详情及该团队的所有可用状态 (States)
+// 保留给 Post Hook 使用
 async function fetchLinearTaskWithStates(issueId) {
     const query = `
         query Issue($id: String!) {
@@ -59,7 +111,7 @@ async function fetchLinearTaskWithStates(issueId) {
     return data.issue;
 }
 
-// 2. 更新任务状态
+// 3. 更新任务状态
 async function updateLinearState(internalIssueId, stateId) {
     const query = `
         mutation UpdateIssue($id: String!, $stateId: String!) {
@@ -71,7 +123,6 @@ async function updateLinearState(internalIssueId, stateId) {
 
 // =================================================================
 // 后置钩子模式 (Post-Hook Mode)
-// 用于 Agent 执行完毕后的状态流转和通知
 // =================================================================
 async function runPostHook(issueIdentifier, exitCode, branchName, worktreePath, logPath) {
     logInfo(`[POST-HOOK] 触发后置钩子，目标任务: ${issueIdentifier}，退出码: ${exitCode}`);
@@ -81,7 +132,6 @@ async function runPostHook(issueIdentifier, exitCode, branchName, worktreePath, 
     let tokenInfo = "未找到 Token 消耗数据";
     if (existsSync(logPath)) {
         const logContent = readFileSync(logPath, 'utf8');
-        // 提取包含 token/cost/usage 的最后 3 行日志
         const matches = logContent.split('\n').filter(l => /(token|cost|usage)/i.test(l)).slice(-3);
         if (matches.length > 0) tokenInfo = matches.join(' | ');
     }
@@ -97,7 +147,6 @@ async function runPostHook(issueIdentifier, exitCode, branchName, worktreePath, 
     logInfo(`[POST-HOOK] Agent 执行成功，开始检查 GitHub PR...`);
     let prUrl = null;
     try {
-        // 在工作区目录下调用 gh 检查 PR
         const prOutput = execSync(`gh pr list --head ${branchName} --json url`, { cwd: worktreePath }).toString();
         const prs = JSON.parse(prOutput);
         if (prs.length > 0) prUrl = prs[0].url;
@@ -114,11 +163,11 @@ async function runPostHook(issueIdentifier, exitCode, branchName, worktreePath, 
     // 4. 存在 PR，执行 Linear 状态流转 (In Progress -> In Review)
     logInfo(`[POST-HOOK] 检测到 PR: ${prUrl}。准备更新 Linear 状态...`);
     const issueData = await fetchLinearTaskWithStates(issueIdentifier);
-    
+
     // 寻找团队中类型为 'review' 或 'completed' 的状态
-    const reviewState = issueData.team.states.nodes.find(s => s.type === 'review') || 
-                        issueData.team.states.nodes.find(s => s.type === 'completed');
-    
+    const reviewState = issueData.team.states.nodes.find(s => s.type === 'review') ||
+        issueData.team.states.nodes.find(s => s.type === 'completed');
+
     if (reviewState) {
         await updateLinearState(issueData.id, reviewState.id);
         logInfo(`[POST-HOOK] 已将 Linear Issue 移动至: [${reviewState.name}]`);
@@ -134,23 +183,36 @@ async function runPostHook(issueIdentifier, exitCode, branchName, worktreePath, 
 async function main() {
     // 拦截器：如果包含 --post-hook 参数，则直接进入钩子模式
     if (process.argv[2] === '--post-hook') {
-        const [,, , issueId, exitCode, branch, wtPath, lPath] = process.argv;
+        const [, , , issueId, exitCode, branch, wtPath, lPath] = process.argv;
         await runPostHook(issueId, exitCode, branch, wtPath, lPath);
         process.exit(0);
     }
 
-    const targetIssueId = process.argv[2];
-    if (!targetIssueId) {
-        logError('请提供 Linear Issue ID，例如: node start-task.js KHA-5');
+    const projectName = process.argv[2];
+    if (!projectName) {
+        logError('请提供 Project 名称，例如: node start-task.js "My Project"');
         process.exit(1);
     }
 
-    logInfo(`开始初始化任务流程: ${targetIssueId}`);
-    const issueData = await fetchLinearTaskWithStates(targetIssueId);
-    logInfo(`成功拉取需求: [${issueData.identifier}] ${issueData.title} (当前状态: ${issueData.state.name})`);
+    logInfo(`[Phase 1] 检查 Codex 余额...`);
+    const usageCheck = checkCodexUsage(10);
+    if (!usageCheck.ok) {
+        logError(`Codex余额较低，暂停自动开发: ${usageCheck.message}`);
+        process.exit(0);
+    }
+    logInfo(usageCheck.message);
+
+    logInfo(`[Phase 2] 获取 Project [${projectName}] 下优先待办任务...`);
+    const issueData = await fetchNextTodoIssue(projectName);
+
+    if (!issueData) {
+        logInfo(`✅ Project [${projectName}] 下没有找到 Todo (unstarted) 的任务。`);
+        process.exit(0);
+    }
+
+    logInfo(`选定需求: [${issueData.identifier}] ${issueData.title} (当前状态: ${issueData.state.name}, Priority: ${issueData.priority})`);
 
     // --- A. Linear 状态前置流转 (Todo -> In Progress) ---
-    // 寻找团队中类型为 'started' (进行中) 的状态
     const inProgressState = issueData.team.states.nodes.find(s => s.type === 'started');
     if (inProgressState && issueData.state.name !== inProgressState.name) {
         logInfo(`正在将 Linear 状态更新为: [${inProgressState.name}]...`);
@@ -160,11 +222,11 @@ async function main() {
     // --- B. 准备 Git Worktree 环境 ---
     const safeTitle = issueData.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const branchName = `feat/${issueData.identifier}-${safeTitle}`;
-    const worktreePath = path.resolve(PROJECT_ROOT, '..', `${issueData.identifier}-worktree`); 
+    const worktreePath = path.resolve(PROJECT_ROOT, '..', `${issueData.identifier}-worktree`);
 
     logInfo(`配置隔离开发环境...`);
     if (existsSync(worktreePath)) {
-        try { execSync(`git worktree remove -f ${worktreePath}`, { stdio: 'ignore' }); } 
+        try { execSync(`git worktree remove -f ${worktreePath}`, { stdio: 'ignore' }); }
         catch (e) { execSync(`rm -rf ${worktreePath}`, { stdio: 'ignore' }); }
     }
 
@@ -178,12 +240,12 @@ async function main() {
     } catch (e) { baseBranch = 'HEAD'; }
 
     let branchExists = false;
-    try { execSync(`git rev-parse --verify ${branchName}`, { stdio: 'ignore' }); branchExists = true; } catch (e) {}
+    try { execSync(`git rev-parse --verify ${branchName}`, { stdio: 'ignore' }); branchExists = true; } catch (e) { }
 
     try {
         if (branchExists) execSync(`git worktree add ${worktreePath} ${branchName}`, { stdio: isDebug ? 'inherit' : 'ignore' });
         else execSync(`git worktree add ${worktreePath} -b ${branchName} ${baseBranch}`, { stdio: isDebug ? 'inherit' : 'ignore' });
-        
+
         if (existsSync(path.join(worktreePath, 'package.json'))) {
             logInfo(`📦 安装隔离区依赖...`);
             execSync(`npm install`, { cwd: worktreePath, stdio: isDebug ? 'inherit' : 'ignore' });
@@ -216,8 +278,9 @@ You are an autonomous engineer.
     const logPath = path.join(LOGS_DIR, `${issueData.identifier}.log`);
     const runnerPath = path.join(RUNNERS_DIR, `run-${issueData.identifier}.sh`);
     const sessionName = `agent-${issueData.identifier}`;
-    
+
     // ✨ 核心：Runner 结束后，调用本脚本的 --post-hook 模式
+    // 注意脚本路径现在可能是在 scripts/ 下，不需要变，只要 __filename 准确即可
     const runnerScript = `#!/bin/bash
 source ~/.zshrc 2>/dev/null || true
 cd "${worktreePath}"
@@ -236,9 +299,9 @@ exec bash
 `;
 
     await fs.writeFile(runnerPath, runnerScript, { mode: 0o755 });
-    
+
     try {
-        try { execSync(`tmux kill-session -t "${sessionName}" >/dev/null 2>&1`); } catch(e){}
+        try { execSync(`tmux kill-session -t "${sessionName}" >/dev/null 2>&1`); } catch (e) { }
         execSync(`tmux new-session -d -s "${sessionName}" -c "${worktreePath}" "${runnerPath}"`);
         logInfo(`✅ Tmux 已启动，Agent 正在后台工作。`);
         logInfo(`👉 实时监控进度: tail -f ${logPath}`);
