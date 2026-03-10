@@ -173,8 +173,8 @@ async function runPostHook(issueIdentifier, exitCode, branchName, worktreePath, 
     logInfo(`[POST-HOOK] 检测到 PR: ${prUrl}。准备更新 Linear 状态...`);
     const issueData = await fetchLinearTaskWithStates(issueIdentifier);
 
-    // 寻找团队中类型为 'review' 或 'completed' 的状态
-    const reviewState = issueData.team.states.nodes.find(s => s.type === 'review') ||
+    // 寻找团队中名为 'In Review' 的状态，或者类型为 'completed' 的状态
+    const reviewState = issueData.team.states.nodes.find(s => s.name.toLowerCase() === 'in review') ||
         issueData.team.states.nodes.find(s => s.type === 'completed');
 
     if (reviewState) {
@@ -222,7 +222,15 @@ async function main() {
     logInfo(`选定需求: [${issueData.identifier}] ${issueData.title} (当前状态: ${issueData.state.name}, Priority: ${issueData.priority})`);
 
     // --- A. Linear 状态前置流转 (Todo -> In Progress) ---
-    const inProgressState = issueData.team.states.nodes.find(s => s.type === 'started');
+    // Linear 的 'started' 类型下可能有多个状态 (例如 In Progress, In Review)，甚至 In Review 可能排在前面。
+    // 我们优先寻找名为 "In Progress" 的状态，否则找第一个类型为 started 且不是 review 相关的状态
+    const startedStates = issueData.team.states.nodes.filter(s => s.type === 'started');
+    let inProgressState = startedStates.find(s => s.name.toLowerCase() === 'in progress');
+    if (!inProgressState && startedStates.length > 0) {
+        // Fallback:找一个不包含 review 字眼的 started 状态
+        inProgressState = startedStates.find(s => !s.name.toLowerCase().includes('review')) || startedStates[0];
+    }
+
     if (inProgressState && issueData.state.name !== inProgressState.name) {
         logInfo(`正在将 Linear 状态更新为: [${inProgressState.name}]...`);
         await updateLinearState(issueData.id, inProgressState.id);
