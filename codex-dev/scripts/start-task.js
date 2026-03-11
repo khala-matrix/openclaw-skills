@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { checkCodexUsage } from './check-usage.js';
@@ -256,7 +257,6 @@ async function main() {
     const repoName = cleanRepoUrl.substring(cleanRepoUrl.lastIndexOf('/') + 1);
 
     // 解析 ~/.openclaw/openclaw.json 获取 workspace
-    const os = require('os');
     const openclawConfigFile = path.join(os.homedir(), '.openclaw', 'openclaw.json');
     let workspaceDir = path.join(os.homedir(), '.openclaw', 'workspace'); // default fallback
 
