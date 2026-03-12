@@ -63,7 +63,7 @@ export async function fetchProjectIssues(projectName) {
 export async function fetchNextTodoIssue(projectName, labelFilter = null) {
     let filter = `
         project: { name: { eqIgnoreCase: $projectName } }
-        state: { type: { eq: "unstarted" } }
+        state: { type: { in: ["unstarted", "backlog"] } }
     `;
     if (labelFilter) {
         filter += `labels: { name: { eqIgnoreCase: "${labelFilter}" } }`;
