@@ -97,6 +97,24 @@ node ~/.openclaw/skills/tech-lead/scripts/gather-context.js "<ProjectName>" [fea
 
 将设计文档写为 `.openclaw/designs/DESIGN-<feature-slug>.md`
 
+### Phase 3.5: 发布到飞书
+
+将设计文档发布为飞书云文档：
+
+```bash
+node ~/.openclaw/skills/tech-lead/scripts/save-to-feishu.js "<designFilePath>" [folderToken]
+```
+
+参数：
+- `designFilePath` — Phase 3 保存的设计文档路径
+- `folderToken`（可选）— 飞书文件夹 token，不提供则创建在个人空间根目录
+
+脚本会：
+1. 读取本地 Markdown 文件
+2. 提取第一行 `#` 标题作为文档标题
+3. 通过飞书 MCP 接口创建云文档
+4. 输出 `{ doc_id, doc_url }` JSON
+
 ### Phase 4: 创建 Linear Issues
 
 确认设计文档无误后，运行 issue 创建脚本：

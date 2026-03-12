@@ -40,7 +40,14 @@ Based on the JSON output (feature spec, codebase tree, key files), write a desig
 ### Step 3: Save Design Document
 Save to `.openclaw/designs/DESIGN-<feature-slug>.md` in the project repo.
 
-### Step 4: Create Linear Issues
+### Step 4: Publish to Feishu
+Run this command to publish the design document to Feishu:
+```bash
+node ~/.openclaw/skills/tech-lead/scripts/save-to-feishu.js "<designFilePath>"
+```
+Where `<designFilePath>` is the full path to the design file saved in Step 3. Report the Feishu doc URL after success.
+
+### Step 5: Create Linear Issues
 Generate a JSON file with tasks, then run:
 ```bash
 node ~/.openclaw/skills/tech-lead/scripts/create-issues.js "<ProjectName>" "<issuesJsonPath>"
