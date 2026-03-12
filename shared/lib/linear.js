@@ -150,7 +150,7 @@ export async function createIssue({ teamId, projectId, title, description, prior
 export async function findOrCreateLabel(teamId, labelName) {
     // 先查找已有的
     const searchQuery = `
-        query FindLabel($teamId: String!, $name: String!) {
+        query FindLabel($teamId: ID!, $name: String!) {
             issueLabels(filter: { team: { id: { eq: $teamId } }, name: { eqIgnoreCase: $name } }, first: 1) {
                 nodes { id name }
             }
